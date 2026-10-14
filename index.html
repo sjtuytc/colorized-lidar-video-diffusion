@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Colorized-LiDAR Conditioned Video Diffusion for Driving Scenes</title>
+  <meta name="description" content="A video diffusion transformer conditioned on colorized-LiDAR renders, trained from scratch on driving logs. Demos, training curves and analysis.">
+  <link rel="stylesheet" href="static/css/index.css">
+</head>
+<body>
+
+<!-- ===================== HERO ===================== -->
+<header class="hero">
+  <div class="container">
+    <h1 class="title">Colorized-LiDAR Conditioned Video Diffusion<br>for Driving Scenes</h1>
+    <p class="authors"><span class="lead">Zelin Zhao</span><sup>*</sup> &nbsp;·&nbsp; Waymo World Modeling Team</p>
+    <p class="affil">Waymo</p>
+    <p class="role-note"><sup>*</sup>Project lead and major contributor.</p>
+    <div class="buttons">
+      <a class="button disabled" href="#" title="Coming soon">📄 Paper</a>
+      <a class="button light" href="#demos">🎬 Demos</a>
+      <a class="button light" href="#results">📈 Training results</a>
+      <a class="button light" href="#faq">❓ FAQ</a>
+      <button class="button light" id="toggle-play" type="button">❚❚ Pause all demos</button>
+    </div>
+  </div>
+</header>
+
+<!-- ===================== TEASER ===================== -->
+<section style="padding-top:0">
+  <div class="container">
+    <div class="col-labels"><span>Ground-truth video</span><span>Colorized-LiDAR conditioning (model input)</span><span>Model prediction</span></div>
+    <figure>
+      <video data-autoplay autoplay muted loop playsinline preload="metadata" poster="static/images/teaser.jpg">
+        <source src="static/videos/teaser.mp4" type="video/mp4"><source src="static/videos/teaser.webm" type="video/webm">
+      </video>
+      <figcaption>Four training clips (81 frames, 256×512, ≈4 s) after 8.2k–11.1k training steps. Left: ground-truth camera video. Middle: the colorized-LiDAR point render that is the <em>only</em> scene-specific input to the model. Right: the model's one-step denoising prediction. Click any video to pause it for inspection.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ===================== ABSTRACT ===================== -->
+<section class="alt">
+  <div class="container narrow">
+    <h2 class="section-title">Abstract</h2>
+    <p>
+      We study whether a video diffusion transformer can learn to synthesize realistic driving video from
+      <strong>colorized LiDAR alone</strong>. For every clip, aggregated LiDAR sweeps are colorized from the cameras at
+      data-generation time and re-projected into the target camera for each of 41 frames; this sparse, geometry-exact but
+      hole-ridden render is fed to a 10-layer DiT (3.75&nbsp;B parameters, Wan&nbsp;2.1 block geometry) through a
+      3D-convolutional dense encoder whose features are added at the first transformer block. The model is trained
+      <strong>from random initialization</strong> with a flow-matching objective in the latent space of a frozen video
+      autoencoder; the LiDAR render is rasterized on the fly in the data loader.
+    </p>
+    <p>
+      On 3,902 training clips the model reaches a stable training loss within ~4k steps and, by 8k–11k steps, its
+      denoising predictions reproduce scene layout, signage, vehicles and lighting across highway, urban, dusk and
+      night scenes — including scenes where the LiDAR render is almost black. We report the full training setup, loss
+      and throughput curves, a step-by-step visual progression, and an honest account of what the current evidence does
+      and does not show: no samples from noise have been generated yet, the training set has been seen ~190 times, and
+      the CPU-side LiDAR decode, not the TPU, bounds throughput.
+    </p>
+    <div class="stats">
+      <div class="stat"><div class="num">3.75&nbsp;B</div><div class="lbl">parameters, random init</div></div>
+      <div class="stat"><div class="num">3,902 / 434</div><div class="lbl">train / held-out clips</div></div>
+      <div class="stat"><div class="num">11.5k+</div><div class="lbl">training steps (of 100k planned)</div></div>
+      <div class="stat"><div class="num">32 TPU</div><div class="lbl">chips, FSDP, batch 64</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== METHOD / SETUP ===================== -->
+<section id="setup">
+  <div class="container narrow">
+    <h2 class="section-title">What was trained</h2>
+
+    <h3>Input: colorized-LiDAR renders</h3>
+    <div class="col-labels two"><span>Ground-truth video</span><span>Colorized-LiDAR render fed to the model</span></div>
+    <figure>
+      <video data-autoplay autoplay muted loop playsinline preload="metadata" poster="static/images/step0_alignment.jpg">
+        <source src="static/videos/step0_alignment.mp4" type="video/mp4"><source src="static/videos/step0_alignment.webm" type="video/webm">
+      </video>
+      <figcaption>Step-0 sanity check: the render is a projection of the aggregated colorized point cloud into the target camera at each frame. Road, poles, signs and buildings land where they are in the video and the camera motion matches. Sky and anything beyond LiDAR range is black; near field is dense, far field sparse. Colors come from the cameras at data-generation time, so the conditioning carries geometry (via what is and is not hit) plus appearance.</figcaption>
+    </figure>
+
+    <h3>Configuration</h3>
+    <table>
+      <tr><th>Setting</th><th>Value</th></tr>
+      <tr><td>Backbone</td><td>Video DiT with the Wan&nbsp;2.1 T2V-14B block geometry (hidden 5120, 40 heads × 128, FFN 13824, text dim 4096) but <strong>10 layers</strong> instead of 40; scanned blocks with rematerialization. ≈3.75&nbsp;B trainable parameters.</td></tr>
+      <tr><td>Initial weights</td><td><strong>Random initialization, no pretrained checkpoint.</strong> None of the 40-layer 14B weights are loaded. The conditioning modules are also randomly initialized (not zero-initialized). Frozen / not trained: the video VAE (used only to decode previews; training is in latent space) and the T5 text encoder (a single precomputed generic "driving" embedding is used for every clip).</td></tr>
+      <tr><td>Target</td><td>81-frame 256×512 RGB clip (≈4 s, front camera) encoded by the video VAE to a 21×32×64×16 latent (precomputed offline).</td></tr>
+      <tr><td>Conditioning</td><td>41 colorized-LiDAR frames at 256×512×3 pixels (first 41 of 97 sweeps per clip, no frame interpolation), rendered on the fly in the data loader → in-model Conv3D dense encoder (temporal patch 2) → added to the token stream at DiT layer 1. Target camera poses are passed through. No conditioning latents, no raymaps.</td></tr>
+      <tr><td>Conditioning dropout</td><td>LiDAR conditioning dropped with p = 0.1 (independent); text never dropped.</td></tr>
+      <tr><td>Objective</td><td>Flow matching, v-parametrization, t ~ U[1e-5, 1].</td></tr>
+      <tr><td>Optimizer</td><td>LaProp (β₁ 0.9, β₂ 0.999, ε 1e-8), global-norm clip 1.0, linear warm-up over 1,000 steps to peak LR 1e-4, parameter EMA 0.999 with 10k-step warm-up.</td></tr>
+      <tr><td>Data</td><td>4,336 clips from January 2025 driving logs of a single vehicle platform; sequential split → <strong>3,902 train / 434 held-out</strong>. Each record ≈139&nbsp;MB (video latents + 97 compressed colorized point sweeps + poses) ≈ 600&nbsp;GB total.</td></tr>
+      <tr><td>Compute</td><td>32 TPU chips (8 hosts × 4), FSDP stage 3, global batch 64 (8 per host). 32 data-loader worker processes per host, each with 5 LiDAR-decode and 8 render threads.</td></tr>
+      <tr><td>Schedule</td><td>100,000 steps planned; checkpoints every 100 steps, retained every 5,000.</td></tr>
+    </table>
+    <p class="muted small">This run is a faithful re-launch of a colleague's earlier configuration from our own code tree; the two configurations differ only in file paths. The earlier run was terminated by a cluster duty-cycle policy at step 8,270; the run reported here has passed that point.</p>
+  </div>
+</section>
+
+<!-- ===================== RESULTS ===================== -->
+<section id="results" class="alt">
+  <div class="container narrow">
+    <h2 class="section-title">Training results</h2>
+    <figure>
+      <img class="figure" src="static/images/loss-and-throughput.png" alt="Training loss (log scale) and throughput">
+      <figcaption>Left: training loss (flow-matching, v-param; logged every 100 steps; log scale). Right: steps per second with a rolling mean. The run is still training at the time of writing (step ≈11,570).</figcaption>
+    </figure>
+
+    <table>
+      <tr><th>Step</th><th>Loss</th><th>Note</th></tr>
+      <tr><td>0</td><td>4.107</td><td>random initialization</td></tr>
+      <tr><td>100</td><td>1.162</td><td>identical to the earlier run over the same window</td></tr>
+      <tr><td>1,000</td><td>0.477</td><td>end of LR warm-up</td></tr>
+      <tr><td>4,000</td><td>0.164</td><td>plateau starts</td></tr>
+      <tr><td>8,200</td><td>0.139</td><td>step at which the earlier run was terminated</td></tr>
+      <tr><td>10,000</td><td>0.139</td><td></td></tr>
+      <tr><td>11,500</td><td>≈0.15</td><td>latest; window mean 0.148 over 10k–11k</td></tr>
+    </table>
+
+    <h3>Throughput and efficiency</h3>
+    <ul>
+      <li><strong>Steady state 6.1–6.7 s/step</strong> (0.15–0.16 steps/s), i.e. ≈1.2 clips/s per host. Device time per step is ≈1.7 s; the remainder is the hosts decoding and rasterizing LiDAR. The run is data-loader-bound, with an average accelerator duty cycle of 0.26.</li>
+      <li>Wall-clock average since step 0 is ≈14.5 s/step because the job was de-scheduled and re-placed many times (steps 0→5k took 13.7 h, 5k→10k took 27.4 h).</li>
+      <li>One transient loss spike to 0.52 near step 8,800 recovers within 200 steps and coincides with a cluster of restarts.</li>
+    </ul>
+
+    <div class="callout warn">
+      <p><strong>Data order after restarts.</strong> The data sampler is re-created with the same seed on every restart and its position is not checkpointed, so each restart replays the training set from the start of epoch 0. We detected this because the image grids at step 100 and step 8,200 (100 steps after a restart) contain the same clips — compare the first and fourth rows in the progression videos below. Early batches are therefore over-represented. This does not affect the pipeline-validation conclusions but will be fixed before any run whose numbers are meant to be compared.</p>
+    </div>
+
+    <div class="callout">
+      <p><strong>How to read the prediction column.</strong> Every prediction shown on this page is a <em>one-step denoising estimate</em>: the ground-truth latent is noised to a random flow-matching time t and the model predicts the clean video in a single evaluation. At small t the task is trivially easy; at large t it is nearly unconditional. A sharp prediction is therefore necessary but not sufficient evidence that the model uses the LiDAR conditioning — and after ≈190 passes over 3,902 clips it is also compatible with memorization. Only sampling from pure noise on the held-out split (not yet run) answers that question.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== DEMOS ===================== -->
+<section id="demos">
+  <div class="container">
+    <h2 class="section-title">Demos</h2>
+    <p class="center muted">Each clip: <strong>ground truth</strong> | <strong>colorized-LiDAR conditioning</strong> | <strong>prediction</strong>. 81 frames at 12 fps, looping. Click a video to pause/resume.</p>
+
+    <h3>After 11,100 steps</h3>
+    <div class="col-labels"><span>Ground truth</span><span>LiDAR conditioning</span><span>Prediction</span></div>
+    <div class="gallery">
+      <div class="card">
+        <h4><span class="tag day">Day</span>Intersection behind a sensor-topped vehicle</h4>
+        <video data-autoplay autoplay muted loop playsinline preload="metadata" poster="static/images/demo_step11100_sample1.jpg"><source src="static/videos/demo_step11100_sample1.mp4" type="video/mp4"><source src="static/videos/demo_step11100_sample1.webm" type="video/webm"></video>
+        <p>Dense LiDAR coverage on the vehicles and signal masts. The prediction recovers the car ahead including its roof sensor, the billboard and the far storefronts; the text on the billboard is not legible.</p>
+      </div>
+      <div class="card">
+        <h4><span class="tag day">Day</span>Highway approaching an overpass</h4>
+        <video data-autoplay autoplay muted loop playsinline preload="metadata" poster="static/images/demo_step11100_sample2.jpg"><source src="static/videos/demo_step11100_sample2.mp4" type="video/mp4"><source src="static/videos/demo_step11100_sample2.webm" type="video/webm"></video>
+        <p>Embankment, overpass, light poles and the green sign are all present in the render and reproduced in the prediction; the trees on the right are blurrier than ground truth.</p>
+      </div>
+      <div class="card">
+        <h4><span class="tag night">Night</span>Highway with an overhead sign</h4>
+        <video data-autoplay autoplay muted loop playsinline preload="metadata" poster="static/images/demo_step11100_sample0.jpg"><source src="static/videos/demo_step11100_sample0.mp4" type="video/mp4"><source src="static/videos/demo_step11100_sample0.webm" type="video/webm"></video>
+        <p>The LiDAR render is almost black apart from the lit sign and lane markings, yet the prediction places the sign, the street lights and the lanes correctly — colorization is camera-derived, so low light means weak conditioning.</p>
+      </div>
+      <div class="card">
+        <h4><span class="tag night">Night</span>Road with a distant sign</h4>
+        <video data-autoplay autoplay muted loop playsinline preload="metadata" poster="static/images/demo_step11100_sample3.jpg"><source src="static/videos/demo_step11100_sample3.mp4" type="video/mp4"><source src="static/videos/demo_step11100_sample3.webm" type="video/webm"></video>
+        <p>Sparse conditioning; the prediction reproduces the lit sign and lane geometry with washed-out road texture.</p>
+      </div>
+      <div class="card">
+        <h4><span class="tag night">Night</span>Underpass with ceiling lights</h4>
+        <video data-autoplay autoplay muted loop playsinline preload="metadata" poster="static/images/demo_step11100_sample4.jpg"><source src="static/videos/demo_step11100_sample4.mp4" type="video/mp4"><source src="static/videos/demo_step11100_sample4.webm" type="video/webm"></video>
+        <p>Overhead structure, the signs at the exit and the lights are captured by the LiDAR render and reproduced.</p>
+      </div>
+      <div class="card">
+        <h4><span class="tag night">Night</span>Fog, traffic lights</h4>
+        <video data-autoplay autoplay muted loop playsinline preload="metadata" poster="static/images/demo_step11100_sample5.jpg"><source src="static/videos/demo_step11100_sample5.mp4" type="video/mp4"><source src="static/videos/demo_step11100_sample5.webm" type="video/webm"></video>
+        <p>Foggy night scene: the render shows the signal mast and curb; the prediction gets the glow and the red lights.</p>
+      </div>
+      <div class="card">
+        <h4><span class="tag night">Night</span>Dark road, few lights</h4>
+        <video data-autoplay autoplay muted loop playsinline preload="metadata" poster="static/images/demo_step11100_sample6.jpg"><source src="static/videos/demo_step11100_sample6.mp4" type="video/mp4"><source src="static/videos/demo_step11100_sample6.webm" type="video/webm"></video>
+        <p>Very little LiDAR color; the prediction stays plausible but low-detail — the hardest regime for this conditioning.</p>
+      </div>
+      <div class="card">
+        <h4><span class="tag night">Night</span>Highway with a lit billboard</h4>
+        <video data-autoplay autoplay muted loop playsinline preload="metadata" poster="static/images/demo_step11100_sample7.jpg"><source src="static/videos/demo_step11100_sample7.mp4" type="video/mp4"><source src="static/videos/demo_step11100_sample7.webm" type="video/webm"></video>
+        <p>The billboard, street lights and the vehicle ahead are placed correctly across the clip.</p>
+      </div>
+    </div>
+
+    <h3>After 8,200 steps</h3>
+    <div class="col-labels"><span>Ground truth</span><span>LiDAR conditioning</span><span>Prediction</span></div>
+    <div class="gallery">
+      <div class="card">
+        <h4><span class="tag day">Day</span>Residential street with palms</h4>
+        <video data-autoplay autoplay muted loop playsinline preload="metadata" poster="static/images/demo_step8200_sample1.jpg"><source src="static/videos/demo_step8200_sample1.mp4" type="video/mp4"><source src="static/videos/demo_step8200_sample1.webm" type="video/webm"></video>
+        <p>Tree trunks, parked cars and the building on the right are in the render; the prediction reproduces the layout and the red truck, with blurrier palm fronds.</p>
+      </div>
+      <div class="card">
+        <h4><span class="tag day">Day</span>Highway with exit gantry</h4>
+        <video data-autoplay autoplay muted loop playsinline preload="metadata" poster="static/images/demo_step8200_sample2.jpg"><source src="static/videos/demo_step8200_sample2.mp4" type="video/mp4"><source src="static/videos/demo_step8200_sample2.webm" type="video/webm"></video>
+        <p>The gantry and the yellow "exit only" panels are reproduced, including when they fill the top of the frame at the end of the clip.</p>
+      </div>
+      <div class="card">
+        <h4><span class="tag day">Day</span>Overcast highway, overhead sign</h4>
+        <video data-autoplay autoplay muted loop playsinline preload="metadata" poster="static/images/demo_step8200_sample7.jpg"><source src="static/videos/demo_step8200_sample7.mp4" type="video/mp4"><source src="static/videos/demo_step8200_sample7.webm" type="video/webm"></video>
+        <p>Flat, low-contrast scene; layout is right, far-field texture is smeared.</p>
+      </div>
+      <div class="card">
+        <h4><span class="tag">Dusk</span>Urban intersection, tail lights</h4>
+        <video data-autoplay autoplay muted loop playsinline preload="metadata" poster="static/images/demo_step8200_sample0.jpg"><source src="static/videos/demo_step8200_sample0.mp4" type="video/mp4"><source src="static/videos/demo_step8200_sample0.webm" type="video/webm"></video>
+        <p>Buildings, traffic lights, signs and the queue of cars are reproduced close to ground truth.</p>
+      </div>
+      <div class="card">
+        <h4><span class="tag night">Night</span>Under a parking structure</h4>
+        <video data-autoplay autoplay muted loop playsinline preload="metadata" poster="static/images/demo_step8200_sample3.jpg"><source src="static/videos/demo_step8200_sample3.mp4" type="video/mp4"><source src="static/videos/demo_step8200_sample3.webm" type="video/webm"></video>
+        <p>Columns, lane markings and vehicles ahead come through the render; the prediction's lighting is slightly washed out.</p>
+      </div>
+      <div class="card">
+        <h4><span class="tag night">Night</span>Fog with traffic lights</h4>
+        <video data-autoplay autoplay muted loop playsinline preload="metadata" poster="static/images/demo_step8200_sample4.jpg"><source src="static/videos/demo_step8200_sample4.mp4" type="video/mp4"><source src="static/videos/demo_step8200_sample4.webm" type="video/webm"></video>
+        <p>The render captures the gantry; the prediction reproduces the red/amber lights and the fog glow.</p>
+      </div>
+      <div class="card">
+        <h4><span class="tag night">Night</span>Street with tail lights</h4>
+        <video data-autoplay autoplay muted loop playsinline preload="metadata" poster="static/images/demo_step8200_sample5.jpg"><source src="static/videos/demo_step8200_sample5.mp4" type="video/mp4"><source src="static/videos/demo_step8200_sample5.webm" type="video/webm"></video>
+        <p>Tail lights and storefront lights are placed correctly; fine texture is lost.</p>
+      </div>
+      <div class="card">
+        <h4><span class="tag night">Night</span>Dark road</h4>
+        <video data-autoplay autoplay muted loop playsinline preload="metadata" poster="static/images/demo_step8200_sample6.jpg"><source src="static/videos/demo_step8200_sample6.mp4" type="video/mp4"><source src="static/videos/demo_step8200_sample6.webm" type="video/webm"></video>
+        <p>Near-empty render; the prediction is plausible but generic.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== PROGRESSION ===================== -->
+<section id="progression" class="alt">
+  <div class="container">
+    <h2 class="section-title">Training progression</h2>
+    <p class="center muted">Rows, top to bottom: <strong>step 100 · 1,000 · 4,000 · 8,200 · 11,100</strong>. Columns: ground truth · LiDAR conditioning · prediction. Each row is a different training batch, except rows 1 and 4, which show the same clip (see the data-order note above) and therefore give a direct before/after over 8,100 steps.</p>
+    <div class="gallery two">
+      <div class="card">
+        <h4>Sample slot 0</h4>
+        <div class="col-labels"><span>GT</span><span>LiDAR</span><span>Prediction</span></div>
+        <video data-autoplay autoplay muted loop playsinline preload="metadata" poster="static/images/progression_slot0.jpg"><source src="static/videos/progression_slot0.mp4" type="video/mp4"><source src="static/videos/progression_slot0.webm" type="video/webm"></video>
+      </div>
+      <div class="card">
+        <h4>Sample slot 1</h4>
+        <div class="col-labels"><span>GT</span><span>LiDAR</span><span>Prediction</span></div>
+        <video data-autoplay autoplay muted loop playsinline preload="metadata" poster="static/images/progression_slot1.jpg"><source src="static/videos/progression_slot1.mp4" type="video/mp4"><source src="static/videos/progression_slot1.webm" type="video/webm"></video>
+      </div>
+    </div>
+    <div class="container narrow" style="margin-top:1.5rem">
+      <ul>
+        <li><strong>Step 100:</strong> colored noise, no structure.</li>
+        <li><strong>Step 1,000:</strong> coarse layout (sky / road / wall split, large objects), heavy blur and texture artifacts.</li>
+        <li><strong>Step 4,000:</strong> scene layout correct, textures smeared ("wet glass" look).</li>
+        <li><strong>Step 8,200:</strong> edges, signs and vehicles legible; remaining error is high-frequency texture and far-field detail.</li>
+        <li><strong>Step 11,100:</strong> no visible change versus 8,200, consistent with the flat loss since ≈4,000.</li>
+      </ul>
+      <p class="muted small">Part of the step-to-step difference is the random noise level drawn for each sample (see "How to read the prediction column").</p>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== FAQ ===================== -->
+<section id="faq">
+  <div class="container narrow">
+    <h2 class="section-title">Frequently asked questions</h2>
+    <table class="qa">
+      <tr><td>How many training steps?</td><td><strong>11,500+</strong> completed of 100,000 planned; the run is still training.</td></tr>
+      <tr><td>What were the initial weights?</td><td><strong>Random.</strong> No pretrained diffusion weights are loaded; the 10-layer DiT, the Conv3D LiDAR encoder and the injection projection all start from random initialization. The video VAE and the text encoder are frozen and only used offline / for previews.</td></tr>
+      <tr><td>How big is the model?</td><td>≈3.75&nbsp;B trainable parameters (10 blocks × ≈351&nbsp;M, plus ≈0.23&nbsp;B of embedders and output head), counted from the checkpoint array shapes.</td></tr>
+      <tr><td>How much training data?</td><td><strong>3,902 clips</strong> of 81 frames each (≈4 s, 256×512). ≈600&nbsp;GB on disk including the compressed LiDAR sweeps.</td></tr>
+      <tr><td>How much held-out data?</td><td><strong>434 clips</strong> (sequential 10 % split), never read during training. No evaluation on them has been run yet.</td></tr>
+      <tr><td>How many epochs?</td><td>With batch 64 over 8 hosts and remainder dropping, one epoch is 60 steps, so 11,500 steps ≈ <strong>190 epochs</strong>. Treat the loss plateau accordingly.</td></tr>
+      <tr><td>What compute was used?</td><td>32 TPU chips (8 hosts × 4) with FSDP; ≈40 chip-days so far (≈1.3 days of the full 32-chip slice) at an average duty cycle of 0.26.</td></tr>
+      <tr><td>Why is throughput only ≈6.5 s/step?</td><td>Decoding the compressed point streams of five sensors and rasterizing 41 frames per clip costs ≈25 s of host CPU per sample; 32 worker processes per host hide most of it, but the accelerators still idle ≈75 % of the time. Pre-rendering the LiDAR frames offline removes this bottleneck entirely.</td></tr>
+      <tr><td>Are these generated videos?</td><td><strong>No.</strong> They are one-step denoising predictions from noised ground truth at a random noise level. Sampling from pure noise on held-out clips is the next step.</td></tr>
+      <tr><td>Does the model actually use the LiDAR?</td><td>The predictions follow the render in cases where unconditional guessing would fail (exact sign positions, vehicles, gantries), which is encouraging, but a conclusive answer requires sampling from noise with and without the conditioning (classifier-free guidance sweep) on held-out clips.</td></tr>
+      <tr><td>Why from scratch rather than fine-tuning the 14B model?</td><td>This stage validates the data path and the conditioning mechanism end to end at low cost. A 10-layer scratch model trains and iterates quickly; fine-tuning the full 40-layer model is the natural next step once the data loader is no longer the bottleneck.</td></tr>
+    </table>
+  </div>
+</section>
+
+<!-- ===================== TAKEAWAYS ===================== -->
+<section id="takeaways" class="alt">
+  <div class="container narrow">
+    <h2 class="section-title">Takeaways and next steps</h2>
+    <ol>
+      <li><strong>The data path is correct.</strong> LiDAR renders are spatially and temporally aligned with the target video at every step inspected, across highway, urban, dusk, night and fog scenes.</li>
+      <li><strong>The model trains.</strong> Loss 4.11 → 1.16 in 100 steps, → 0.16 by 4k, then flat at 0.14–0.15; predictions improve monotonically to step ≈8k and are unchanged visually at 11k.</li>
+      <li><strong>Throughput, not modeling, is the blocker.</strong> At ≈1.2 clips/s per host the accelerators sit mostly idle. Early-exit decoding, a native decode+render op, or materializing the renders offline are the fixes.</li>
+      <li><strong>The dataset is small.</strong> ≈190 epochs over 3,902 clips means the plateau may reflect memorization; a held-out loss and real samples decide this, not more steps.</li>
+      <li><strong>No samples from noise yet.</strong> Conditioning quality cannot be judged until inference runs on the held-out split with a guidance sweep.</li>
+    </ol>
+    <p><strong>Planned:</strong> (i) sampling from noise on the 434 held-out clips at the retained checkpoints with LiDAR guidance 1–3; (ii) held-out flow-matching loss at steps 0 / 5k / 10k; (iii) fix the restart data order; (iv) offline LiDAR rendering to lift throughput; (v) then scale to the full 40-layer pretrained backbone.</p>
+  </div>
+</section>
+
+<!-- ===================== BIBTEX ===================== -->
+<section id="bibtex">
+  <div class="container narrow">
+    <h2 class="section-title">BibTeX</h2>
+<pre><code>@misc{zhao2026colorizedlidar,
+  title        = {Colorized-LiDAR Conditioned Video Diffusion for Driving Scenes},
+  author       = {Zhao, Zelin and {Waymo World Modeling Team}},
+  year         = {2026},
+  howpublished = {Project page},
+  note         = {Zelin Zhao: project lead and major contributor}
+}</code></pre>
+  </div>
+</section>
+
+<footer>
+  <div class="container narrow center">
+    <p>Waymo World Modeling Team · Project lead: Zelin Zhao.<br>
+    Page layout follows the <a href="https://github.com/eliahuhorwitz/Academic-project-page-template">Academic Project Page Template</a> (CC BY-SA 4.0); this page is fully self-contained (no external assets).</p>
+  </div>
+</footer>
+
+<script src="static/js/index.js"></script>
+</body>
+</html>
